@@ -11,3 +11,7 @@ feedparser>=6.0.10
 trafilatura>=1.6.0
 google-api-python-client>=2.0.0
 requests>=2.28.0
+
+twscrape==0.20.1
+nest_asyncio
+playwright

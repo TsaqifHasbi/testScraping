@@ -806,16 +806,20 @@ def get_raw_scraped_data(keyword: str, n_rows: int = 150) -> pd.DataFrame:
     from dashboard.poc.ingestion.news_scraper import fetch_news_data
     from dashboard.poc.ingestion.threads_scraper import fetch_threads_data
     from dashboard.poc.ingestion.instagram_scraper import fetch_instagram_data
+    from dashboard.poc.ingestion.twitter_scraper import fetch_twitter_data
+    from dashboard.poc.ingestion.tiktok_scraper import fetch_tiktok_data
 
     # Kita batasi agar request API tidak terlalu lama
-    max_per_platform = min(50, max(20, n_rows // 4))
+    max_per_platform = min(50, max(20, n_rows // 5))
     
     youtube_data = fetch_youtube_data(keyword, max_results=max_per_platform)
     news_data = fetch_news_data(keyword, max_results=max_per_platform)
     threads_data = fetch_threads_data(keyword, max_results=max_per_platform)
     instagram_data = fetch_instagram_data(keyword, max_results=max_per_platform)
+    twitter_data = fetch_twitter_data(keyword, max_results=max_per_platform)
+    tiktok_data = fetch_tiktok_data(keyword, max_results=max_per_platform)
     
-    combined = youtube_data + news_data + threads_data + instagram_data
+    combined = youtube_data + news_data + threads_data + instagram_data + twitter_data + tiktok_data
     
     if not combined:
         return pd.DataFrame(columns=[

@@ -611,7 +611,10 @@ with tab9:
         if "raw_data_pages" not in st.session_state:
             st.session_state.raw_data_pages = {}
 
-        platforms_in_data = sorted(list(df_filtered["platform"].dropna().astype(str).unique())) if "platform" in df_filtered.columns else ["Data"]
+        if "platform" in df_filtered.columns:
+            platforms_in_data = ["YouTube", "Berita Online", "Instagram", "Threads", "X/Twitter", "TikTok"]
+        else:
+            platforms_in_data = ["Data"]
     
         tabs = st.tabs([f"{p}" for p in platforms_in_data])
     
