@@ -7,9 +7,13 @@ from datetime import datetime
 import os
 
 try:
+    # pyrefly: ignore [missing-import]
     import undetected_chromedriver as uc
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.common.by import By
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.support.ui import WebDriverWait
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.support import expected_conditions as EC
 except ImportError:
     pass
@@ -45,9 +49,12 @@ def scrape_twitter(keyword, max_results=100):
         time.sleep(2)
 
     # 2. Mulai Pencarian
-    # Tambahkan lang:id agar hasil pencarian dipaksa berbahasa Indonesia
-    search_keyword = keyword if "lang:" in keyword else f"{keyword} lang:id"
-    query = urllib.parse.quote(search_keyword)
+    # Tambahkan lang:id agar hasil pencarian berbahasa Indonesia
+    from datetime import datetime
+    cutoff_date = datetime(2024, 1, 1)  # Sejak awal 2024
+    # Gunakan keyword apa adanya tanpa lang:id (keyword sudah bahasa Indonesia)
+    query = urllib.parse.quote(keyword)
+    # TIDAK pakai lang:id karena membuat Twitter mengembalikan tweet sangat tua
     url = f"https://x.com/search?q={query}&src=typed_query&f=live"
     
     TWITTER_DRIVER.get(url)
@@ -61,6 +68,21 @@ def scrape_twitter(keyword, max_results=100):
         pass
         
     time.sleep(3)
+    
+    # === DEBUG: Cek kondisi halaman ===
+    try:
+        article_count = TWITTER_DRIVER.execute_script('return document.querySelectorAll(\'article[data-testid="tweet"]\').length')
+        page_title = TWITTER_DRIVER.title
+        current_url = TWITTER_DRIVER.current_url
+        print(f"    [DEBUG] URL: {current_url[:80]}...")
+        print(f"    [DEBUG] Title: {page_title}")
+        print(f"    [DEBUG] Jumlah tweet di halaman: {article_count}")
+        if article_count == 0:
+            # Cek apakah ada pesan error/kosong
+            body_text = TWITTER_DRIVER.execute_script('return document.body.innerText.substring(0, 300)')
+            print(f"    [DEBUG] Body text: {body_text[:200]}")
+    except Exception as e:
+        print(f"    [DEBUG] Error saat cek halaman: {e}")
     
     results = []
     last_height = TWITTER_DRIVER.execute_script("return document.body.scrollHeight")
@@ -95,6 +117,7 @@ def scrape_twitter(keyword, max_results=100):
         let likes = 0, retweets = 0, comments = 0, views = 0;
         const group = article.querySelector('div[role="group"]');
         if (group) {
+            // Metode 1: Parsing dari aria-label grup tombol
             const label = group.getAttribute('aria-label') || "";
             const parts = label.toLowerCase().split(',');
             for (const p of parts) {
@@ -106,6 +129,34 @@ def scrape_twitter(keyword, max_results=100):
                 else if (p.includes('balas') || p.includes('repl')) comments = num;
                 else if (p.includes('posting ulang') || p.includes('repost') || p.includes('retweet')) retweets = num;
                 else if (p.includes('tayangan') || p.includes('view')) views = num;
+            }
+            
+            // Metode 2: Fallback - ambil views dari link analytics (elemen terakhir di group)
+            if (views === 0) {
+                const analyticsLink = group.querySelector('a[href*="/analytics"]');
+                if (analyticsLink) {
+                    const vText = analyticsLink.getAttribute('aria-label') || analyticsLink.innerText || '';
+                    const vMatch = vText.match(/([\\d,\\.]+)/g);
+                    if (vMatch) {
+                        views = parseInt(vMatch.join('').replace(/,/g, ''));
+                    }
+                }
+            }
+            
+            // Metode 3: Fallback - ambil dari tombol-tombol individual via aria-label
+            if (likes === 0 && comments === 0 && retweets === 0) {
+                const buttons = group.querySelectorAll('button[data-testid]');
+                for (const btn of buttons) {
+                    const testId = btn.getAttribute('data-testid') || '';
+                    const ariaL = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    const numM = ariaL.match(/([\\d,]+)/);
+                    if (!numM) continue;
+                    const val = parseInt(numM[1].replace(/,/g, ''));
+                    
+                    if (testId === 'like' || ariaL.includes('like') || ariaL.includes('suka')) likes = val;
+                    else if (testId === 'reply' || ariaL.includes('repl') || ariaL.includes('balas')) comments = val;
+                    else if (testId === 'retweet' || ariaL.includes('repost') || ariaL.includes('retweet')) retweets = val;
+                }
             }
         }
         
@@ -144,6 +195,9 @@ def scrape_twitter(keyword, max_results=100):
             time.sleep(1.5) # Tunggu agar Twitter sempat memuat sisa teks
             
             extracted = TWITTER_DRIVER.execute_script(extract_js)
+            print(f"    [DEBUG] JS returned: {len(extracted) if extracted else 0} posts")
+            if extracted and len(extracted) > 0:
+                print(f"    [DEBUG] Post pertama: url={extracted[0].get('url','N/A')[:50]}, content={str(extracted[0].get('content',''))[:50]}")
             for post in extracted:
                 if len(results) >= max_results:
                     break
@@ -155,6 +209,17 @@ def scrape_twitter(keyword, max_results=100):
                 content = post.get('content', '')
                 if not content:
                     continue
+                
+                # Filter tweet tua (lebih dari 6 bulan)
+                tweet_date_str = post.get('date', '')
+                if tweet_date_str:
+                    try:
+                        tweet_dt = datetime.fromisoformat(tweet_date_str.replace('Z', '+00:00'))
+                        if tweet_dt.replace(tzinfo=None) < cutoff_date:
+                            print(f"    [DEBUG] SKIP tweet tua: {tweet_date_str}")
+                            continue  # Skip tweet terlalu tua
+                    except:
+                        pass
                     
                 seen_urls.add(url_tweet)
                 
@@ -167,7 +232,7 @@ def scrape_twitter(keyword, max_results=100):
                     "description": "",
                     "created_at": post.get('date', '') or datetime.now().isoformat(),
                     "likes": post.get('likes', 0),
-                    "shares": post.get('retweets', 0), # Menggunakan retweets di kolom shares
+                    "reposts": post.get('retweets', 0), # Mengganti nama shares menjadi reposts sesuai permintaan
                     "comments": post.get('comments', 0),
                     "views": post.get('views', 0),
                     "url": url_tweet,

@@ -18,8 +18,8 @@ for topic, keywords in TOPICS.items():
         print(f"\n  [{current_kw}/{total_keywords}] Keyword: '{kw}'")
         
         # Jalankan Selenium Twitter untuk keyword ini
-        # Set max_results sesuai kebutuhan (misal 50 atau 100)
-        data = scrape_twitter(kw, max_results=50)
+        # Ambil sampai 100 data per keyword agar totalnya bisa mencapai 2000+
+        data = scrape_twitter(kw, max_results=100)
         
         # Tambahkan label topic ke data
         for d in data:

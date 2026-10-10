@@ -3,9 +3,11 @@
 # ============================================================
 import time
 import urllib.parse
+# pyrefly: ignore [missing-import]
 from bs4 import BeautifulSoup
 import json
 import re
+from datetime import datetime
 
 def parse_eng(text):
     if not text: return '0'
@@ -30,9 +32,13 @@ def parse_eng(text):
 import os
 
 try:
+    # pyrefly: ignore [missing-import]
     import undetected_chromedriver as uc
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.common.by import By
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.support.ui import WebDriverWait
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.support import expected_conditions as EC
 except ImportError:
     pass
@@ -124,7 +130,15 @@ def scrape_tiktok(keyword, max_results=100):
                     continue
                     
                 author_tag = card.find('p', {'data-e2e': 'search-card-user-unique-id'})
-                author = author_tag.text.strip() if author_tag else "TikTok_User"
+                if not author_tag:
+                    author_tag = card.find('span', {'data-e2e': 'search-card-user-unique-id'})
+                author_handle = author_tag.text.strip() if author_tag else ""
+                
+                # Coba ambil nickname (display name)
+                nick_tag = card.find('p', {'data-e2e': 'search-card-user-nickname'})
+                if not nick_tag:
+                    nick_tag = card.find('span', {'data-e2e': 'search-card-user-nickname'})
+                author_name = nick_tag.text.strip() if nick_tag else (author_handle or "TikTok_User")
                 
                 views_tag = card.find('strong', {'data-e2e': 'video-views'})
                 if not views_tag:
@@ -231,17 +245,22 @@ def scrape_tiktok(keyword, max_results=100):
                             pass
                     
                     results.append({
+                        "post_id": f"tiktok_{abs(hash(url_video)) % 1000000}",
                         "platform": "TikTok",
-                        "topic": "UNKNOWN",
+                        "author": author_name,
+                        "handle": f"@{author_handle}" if author_handle else "",
                         "content": caption,
-                        "author": author,
-                        "url": url_video,
-                        "views": views,
+                        "description": "",
+                        "created_at": "",
                         "likes": likes, 
+                        "shares": shares,
                         "comments": comments,
-                        "shares": shares
+                        "views": views,
+                        "url": url_video,
+                        "keyword": keyword,
+                        "scraped_at": datetime.now().isoformat()
                     })
-                    print(f"  -> Video {author} | V: {views} | L: {likes} | C: {comments} | S: {shares}")
+                    print(f"  -> Video {author_name} | V: {views} | L: {likes} | C: {comments} | S: {shares}")
                     
             except Exception:
                 pass

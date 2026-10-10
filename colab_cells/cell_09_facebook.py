@@ -5,6 +5,7 @@ import time
 import os
 import re
 import urllib.parse
+# pyrefly: ignore [missing-import]
 from bs4 import BeautifulSoup
 
 def parse_eng(text):
@@ -29,9 +30,13 @@ def parse_eng(text):
 
 
 try:
+    # pyrefly: ignore [missing-import]
     import undetected_chromedriver as uc
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.common.by import By
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.support.ui import WebDriverWait
+    # pyrefly: ignore [missing-import]
     from selenium.webdriver.support import expected_conditions as EC
 except ImportError:
     pass

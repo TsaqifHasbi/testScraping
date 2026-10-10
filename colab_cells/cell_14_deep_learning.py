@@ -4,7 +4,9 @@
 # Pastikan Runtime Colab menggunakan T4 GPU agar cepat!
 # ============================================================
 import pandas as pd
+# pyrefly: ignore [missing-import]
 import torch
+# pyrefly: ignore [missing-import]
 from transformers import pipeline
 from tqdm.auto import tqdm
 import os

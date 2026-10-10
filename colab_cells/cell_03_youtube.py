@@ -6,6 +6,7 @@ from cell_02_config import *
 # Target: ~100 video per keyword
 # ============================================================
 
+# pyrefly: ignore [missing-import]
 import scrapetube
 import subprocess
 import json
@@ -66,18 +67,27 @@ def scrape_youtube_api(keyword, max_results=100):
             "part": "snippet",
             "q": keyword,
             "type": "video",
-            "maxResults": min(50, max_results),  # Maksimal 50 per request
+            "maxResults": 50,  # Maksimal 50 per request
+            "publishedAfter": "2025-01-01T00:00:00Z",
             "key": api_key
         }
         
-        while len(video_ids) < max_results:
+        while True:
             res = requests.get(search_url, params=params)
             if res.status_code != 200:
                 err_msg = res.text[:100]
                 print(f"    [!] Error API v3 (Search): {res.status_code} - {err_msg}")
-                if res.status_code == 429 or "Quota exceeded" in res.text:
+                if res.status_code == 429 or "Quota exceeded" in res.text or "quotaExceeded" in res.text or res.status_code == 403:
                     _yt_api_exhausted = True
-                    print("    [INFO] Kuota API habis, selanjutnya otomatis pakai scrapetube")
+                    print("\n" + "="*60)
+                    print("🚨 KUOTA API YOUTUBE HABIS! 🚨")
+                    print("Batas token harian YouTube Data API telah tercapai (HTTP 403 Quota Exceeded).")
+                    print("Proses dihentikan agar data sebelumnya bisa tersimpan.")
+                    print("API YouTube akan reset pada TENGAH MALAM waktu Pasifik (Pacific Time / PT).")
+                    print("Atau sekitar jam 14:00 WIB / 15:00 WIB keesokan harinya.")
+                    print("Silakan jalankan ulang script ini setelah jam tersebut untuk melanjutkan.")
+                    print("="*60 + "\n")
+                    sys.exit(1)
                 return None
                 
             data = res.json()
@@ -89,12 +99,9 @@ def scrape_youtube_api(keyword, max_results=100):
                 vid = item["id"]["videoId"]
                 video_ids.append(vid)
                 snippets[vid] = item["snippet"]
-                
-                if len(video_ids) >= max_results:
-                    break
                     
             # Pagination
-            if "nextPageToken" in data and len(video_ids) < max_results:
+            if "nextPageToken" in data:
                 params["pageToken"] = data["nextPageToken"]
             else:
                 break
@@ -136,7 +143,6 @@ def scrape_youtube_api(keyword, max_results=100):
                 "description": snip.get("description", ""),
                 "created_at": snip.get("publishedAt", ""),
                 "likes": int(st.get("likeCount", 0)),
-                "shares": 0,
                 "comments": int(st.get("commentCount", 0)),
                 "views": int(st.get("viewCount", 0)),
                 "views_text": str(st.get("viewCount", 0)),
@@ -192,7 +198,6 @@ def scrape_youtube_scrapetube(keyword, max_results=100):
                 "description": "",
                 "created_at": published,
                 "likes": 0,
-                "shares": 0,
                 "comments": 0,
                 "views": views,
                 "views_text": str(views),

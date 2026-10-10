@@ -1,5 +1,7 @@
+# pyrefly: ignore [missing-import]
 import undetected_chromedriver as uc
 import time
+# pyrefly: ignore [missing-import]
 from bs4 import BeautifulSoup
 import json
 
