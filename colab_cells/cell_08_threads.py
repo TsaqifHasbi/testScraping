@@ -449,6 +449,8 @@ def scrape_threads(keyword, max_results=200):
                 if (match) author = match[1];
                 if (!author) author = authorLink.innerText.trim().replace('@', '');
             }
+            // Skip akun Meta AI bot langsung
+            if (author && (author.toLowerCase() === 'meta.ai' || author.toLowerCase() === 'metaai')) continue;
             
             // === URL ===
             let postUrl = '';
@@ -458,6 +460,7 @@ def scrape_threads(keyword, max_results=200):
                 postUrl = href.startsWith('http') ? href : 'https://www.threads.net' + href;
                 postUrl = postUrl.split('?')[0];
             }
+            if (postUrl && postUrl.toLowerCase().includes('/@meta.ai/')) continue;
             
             // === CONTENT ===
             const spans = container.querySelectorAll('span[dir="auto"]');
@@ -562,6 +565,11 @@ def scrape_threads(keyword, max_results=200):
                 content_text = item.get('text', '')
                 date_str = item.get('date', '')
                 
+                author_clean = (item.get('username', '') or '').lower().strip()
+                # Filter Meta AI: lewati jika postingan berasal dari akun bot resmi @meta.ai (postingan user yang ngetag meta.ai tetap diambil)
+                if author_clean in ['meta.ai', 'metaai', '@meta.ai'] or 'threads.net/@meta.ai' in post_url.lower():
+                    continue
+
                 # Filter tanggal: stop jika post sudah sebelum 1 Jan 2025
                 if date_str and not _is_after_cutoff(date_str):
                     date_cutoff_reached = True
