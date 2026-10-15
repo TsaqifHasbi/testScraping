@@ -63,16 +63,17 @@ def scrape_youtube_api(keyword, max_results=100):
         video_ids = []
         snippets = {}
         
+        per_page = min(50, max_results)  # API max 50 per request
         params = {
             "part": "snippet",
             "q": keyword,
             "type": "video",
-            "maxResults": 50,  # Maksimal 50 per request
+            "maxResults": per_page,
             "publishedAfter": "2025-01-01T00:00:00Z",
             "key": api_key
         }
         
-        while True:
+        while len(video_ids) < max_results:
             res = requests.get(search_url, params=params)
             if res.status_code != 200:
                 err_msg = res.text[:100]
@@ -87,7 +88,8 @@ def scrape_youtube_api(keyword, max_results=100):
                     print("Atau sekitar jam 14:00 WIB / 15:00 WIB keesokan harinya.")
                     print("Silakan jalankan ulang script ini setelah jam tersebut untuk melanjutkan.")
                     print("="*60 + "\n")
-                    sys.exit(1)
+                    # Jangan sys.exit, raise exception agar runner bisa save data
+                    raise SystemExit("YouTube API quota exhausted")
                 return None
                 
             data = res.json()
@@ -99,7 +101,14 @@ def scrape_youtube_api(keyword, max_results=100):
                 vid = item["id"]["videoId"]
                 video_ids.append(vid)
                 snippets[vid] = item["snippet"]
+            
+            print(f"      [API] {len(video_ids)} video ID terkumpul...")
                     
+            # Stop jika sudah cukup
+            if len(video_ids) >= max_results:
+                video_ids = video_ids[:max_results]
+                break
+                
             # Pagination
             if "nextPageToken" in data:
                 params["pageToken"] = data["nextPageToken"]
@@ -231,19 +240,19 @@ def scrape_youtube(keyword, max_results=100):
     return scrape_youtube_scrapetube(keyword, max_results)
 
 # ============================================================
-# TEST
+# TEST (hanya jalan kalau dieksekusi langsung, bukan saat import)
 # ============================================================
-print("[TEST] Menguji YouTube scraper...")
-_test_api_key = _yt_key
-if _test_api_key and _test_api_key != "PASTE_YOUTUBE_API_KEY_DI_SINI":
-    print("[INFO] Menggunakan jalur API v3 Resmi")
-else:
-    print("[INFO] Menggunakan jalur Fallback (API Key tidak ditemukan)")
-    
-test = scrape_youtube("Makan Bergizi Gratis", max_results=5)
-print(f"[OK] YouTube: {len(test)} video ditemukan")
+if __name__ == "__main__":
+    print("[TEST] Menguji YouTube scraper...")
+    _test_api_key = _yt_key
+    if _test_api_key and _test_api_key != "PASTE_YOUTUBE_API_KEY_DI_SINI":
+        print("[INFO] Menggunakan jalur API v3 Resmi")
+    else:
+        print("[INFO] Menggunakan jalur Fallback (API Key tidak ditemukan)")
 
-for t in test[:3]:
-    print(f"   [VIDEO] {t['content'][:70]}...")
-    print(f"      Author: {t['author']} | Views: {t['views']} | URL: {t['url'][:60]}")
+    test = scrape_youtube("Makan Bergizi Gratis", max_results=5)
+    print(f"[OK] YouTube: {len(test)} video ditemukan")
 
+    for t in test[:3]:
+        print(f"   [VIDEO] {t['content'][:70]}...")
+        print(f"      Author: {t['author']} | Views: {t['views']} | URL: {t['url'][:60]}")

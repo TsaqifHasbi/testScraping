@@ -1,12 +1,24 @@
 from cell_02_config import *
 # ============================================================
-# CELL 8: SCRAPER THREADS (SELENIUM UNDETECTED)
+# CELL 8: SCRAPER THREADS (SELENIUM UNDETECTED) — v3
+# - Tab "Recent" (bukan Top) untuk hasil lebih relevan
+# - Single-Phase: Scroll + Ekstraksi langsung dari DOM
+# - Filter tanggal: 1 Januari 2025 - sekarang
+# - Filter konten: skip post yang tidak relevan dengan keyword
+# - Profil persisten (login tersimpan)
+# - Anti-throttling background tab
+# - Deteksi rate limit / login wall
+# - Clean single-line CSV output
+# - Auto-resume support via run_threads_only.py
 # ============================================================
 
 import time
 import urllib.parse
-from datetime import datetime
+import os
+import subprocess
+import random
 import re
+from datetime import datetime, timezone, timedelta
 
 try:
     # pyrefly: ignore [missing-import]
@@ -20,53 +32,397 @@ try:
 except ImportError:
     pass
 
+# Simpan driver di level global agar login hanya 1x
 THREADS_DRIVER = None
 
-def scrape_threads(keyword, max_results=30):
+# Path untuk Chrome profile persisten (login disimpan)
+THREADS_PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".threads_scraper_profile")
+
+# WIB timezone (UTC+7)
+WIB = timezone(timedelta(hours=7))
+
+# Tanggal cutoff: 1 Januari 2025
+DATE_CUTOFF = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+# ---- Global tracking ----
+_SEEN_URLS = set()
+
+
+def reset_tracking():
+    """Reset tracking (untuk awal run baru tanpa resume)."""
+    global _SEEN_URLS
+    _SEEN_URLS = set()
+
+
+def load_seen_urls(urls):
+    """Load URL yang sudah ada dari CSV sebelumnya (untuk resume)."""
+    global _SEEN_URLS
+    _SEEN_URLS.update(urls)
+    print(f"    [DEDUP] {len(_SEEN_URLS)} URL sudah diketahui, akan di-skip.")
+
+
+def _to_wib(date_str):
+    """Convert ISO datetime string ke format WIB."""
+    if not date_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        dt_wib = dt.astimezone(WIB)
+        return dt_wib.strftime('%Y-%m-%d %H:%M:%S') + ' WIB'
+    except Exception:
+        return date_str
+
+
+def _is_after_cutoff(date_str):
+    """Cek apakah tanggal post >= 1 Januari 2025."""
+    if not date_str:
+        return True  # Jika tidak ada tanggal, tetap ambil
+    try:
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        return dt >= DATE_CUTOFF
+    except Exception:
+        return True
+
+
+def _is_content_relevant(content, keyword):
+    """Filter 2 lapis:
+    1. Deteksi bahasa Indonesia (harus ada kata-kata umum Indonesia)
+    2. Cek relevansi keyword (minimal 1 kata dari keyword ada di konten)
+    Post harus lolos SALAH SATU dari 2 cek ini untuk disimpan."""
+    if not content:
+        return False
+    
+    content_lower = content.lower()
+    
+    # === LAPIS 1: Cek apakah ini bahasa Indonesia ===
+    # Kata-kata yang SANGAT umum di bahasa Indonesia
+    indo_common = [
+        'yang', 'dan', 'dari', 'untuk', 'dengan', 'ini', 'itu',
+        'ada', 'tidak', 'akan', 'bisa', 'sudah', 'juga', 'atau',
+        'pada', 'karena', 'tapi', 'kalau', 'kalo', 'udah', 'gak',
+        'aja', 'sih', 'dong', 'deh', 'loh', 'nih', 'banget',
+        'mau', 'buat', 'sama', 'lagi', 'jadi', 'kan', 'ya',
+        'aku', 'saya', 'kamu', 'dia', 'mereka', 'kita',
+        'pemerintah', 'program', 'rakyat', 'Indonesia',
+        'sekolah', 'desa', 'koperasi', 'makan', 'gratis',
+    ]
+    indo_word_count = sum(1 for w in indo_common if f' {w} ' in f' {content_lower} ')
+    is_indonesian = indo_word_count >= 2  # Minimal 2 kata Indonesia umum
+    
+    # Jika JELAS bukan Latin (Jepang/Korea/Arab/dll), langsung tolak
+    latin_chars = sum(1 for c in content if c.isascii() and c.isalpha())
+    total_alpha = sum(1 for c in content if c.isalpha())
+    if total_alpha > 0 and latin_chars / total_alpha < 0.3:
+        return False
+    
+    # === LAPIS 2: Cek apakah mengandung kata dari keyword ===
+    keyword_lower = keyword.lower()
+    # Hapus emoji dari keyword untuk matching
+    import re as _re
+    keyword_clean = _re.sub(r'[^\w\s]', '', keyword_lower).strip()
+    
+    has_keyword = False
+    if keyword_clean in content_lower:
+        has_keyword = True
+    else:
+        words = [w for w in keyword_clean.split() if len(w) >= 3]
+        if words:
+            has_keyword = any(w in content_lower for w in words)
+        else:
+            # Keyword sangat pendek (misal "MBG") — cek exact match
+            has_keyword = keyword_clean in content_lower
+    
+    # Lolos jika:
+    # 1. Ada kata dari keyword di konten (paling penting), ATAU
+    # 2. Bahasa Indonesia yang kuat (>=3 kata umum) — tangkap diskusi kontekstual
+    return has_keyword or (is_indonesian and indo_word_count >= 3)
+
+
+def _kill_zombie_chrome():
+    """Membunuh proses Chrome yang tertinggal dan mengunci profile Threads."""
+    try:
+        import psutil
+        for p in psutil.process_iter(['name', 'cmdline']):
+            if p.info['name'] and 'chrome' in p.info['name'].lower():
+                cmd = ' '.join(p.info['cmdline'] or [])
+                if 'threads_scraper_profile' in cmd:
+                    p.kill()
+    except Exception:
+        pass
+
+
+def _make_chrome_options():
+    """Membuat objek uc.ChromeOptions baru yang segar."""
+    options = uc.ChromeOptions()
+    options.add_argument('--disable-popup-blocking')
+    options.add_argument('--disable-notifications')
+    options.add_argument('--lang=id-ID,id,en-US,en')
+    options.add_argument('--disable-features=Translate')
+    # Anti-throttling: biar background tab tetap jalan lancar
+    options.add_argument('--disable-background-timer-throttling')
+    options.add_argument('--disable-backgrounding-occluded-windows')
+    options.add_argument('--disable-renderer-backgrounding')
+    options.add_argument(f'--user-data-dir={THREADS_PROFILE_DIR}')
+
+    prefs = {
+        "intl.accept_languages": "id-ID,id,en-US,en",
+        "translate": {"enabled": False}
+    }
+    options.add_experimental_option("prefs", prefs)
+    return options
+
+
+def _init_driver(skip_input=False):
+    """Buat driver baru dengan profile persisten."""
     global THREADS_DRIVER
-    
-    print(f"    - Threads Selenium: mencari '{keyword}'...")
-    
-    if THREADS_DRIVER is None:
-        print("    [!] Membuka Chrome untuk Threads pertama kali...")
-        options = uc.ChromeOptions()
-        options.add_argument('--disable-popup-blocking')
-        options.add_argument('--lang=id')
-        options.add_argument('--disable-features=Translate')
-        
-        # Sesuaikan dengan versi Chrome
-        THREADS_DRIVER = uc.Chrome(options=options, version_main=153)
-        
-        THREADS_DRIVER.get("https://www.threads.net/login")
-        print("\n" + "="*60)
-        print("[!] TINDAKAN DIBUTUHKAN (THREADS) [!]")
-        print("1. Jendela Chrome sudah terbuka.")
-        print("2. Silakan LOGIN akun Instagram/Threads secara MANUAL.")
-        print("3. JANGAN tekan Enter sebelum Anda masuk ke Beranda Threads!")
-        print("="*60 + "\n")
-        
-        input(">>> TEKAN ENTER DI SINI JIKA SUDAH SELESAI LOGIN... ")
+
+    # Tutup driver lama jika ada
+    if THREADS_DRIVER is not None:
+        try:
+            THREADS_DRIVER.quit()
+        except:
+            pass
+        THREADS_DRIVER = None
+
+    _kill_zombie_chrome()
+    time.sleep(1)
+
+    # Fix infinite hang when downloading chromedriver
+    import socket
+    socket.setdefaulttimeout(30)
+
+    try:
+        THREADS_DRIVER = uc.Chrome(options=_make_chrome_options(), version_main=154)
+    except Exception as e:
+        print(f"    [WARN] Gagal init uc.Chrome dengan version_main=154, mencoba tanpa: {e}")
+        _kill_zombie_chrome()
+        time.sleep(1)
+        THREADS_DRIVER = uc.Chrome(options=_make_chrome_options())
+
+    # Navigasi ke beranda Threads untuk cek login
+    THREADS_DRIVER.get("https://www.threads.net")
+    print("    [INFO] Menunggu Threads dimuat...")
+    time.sleep(4)
+
+    is_logged_in = False
+    try:
+        body_text = (THREADS_DRIVER.execute_script("return document.body.innerText") or "").lower()
+        if 'for you' in body_text or 'untuk anda' in body_text or 'search' in body_text or 'cari' in body_text:
+            is_logged_in = True
+    except Exception:
+        pass
+
+    if not skip_input and not is_logged_in:
+        print("\n" + "=" * 60)
+        print("🚨 WAJIB CEK BROWSER THREADS 🚨")
+        print("1. Jendela Chrome sudah terbuka di layar Anda.")
+        print("2. Pastikan Anda SUDAH LOGIN dan melihat feed/beranda Threads.")
+        print("3. Jika diminta Login Instagram, kerjakan dulu.")
+        print("4. JANGAN lanjut jika layar browser masih error atau halaman login.")
+        print("=" * 60 + "\n")
+
+        try:
+            input("👉 TEKAN ENTER DI SINI HANYA JIKA BROWSER SUDAH LOGIN & AMAN... ")
+        except Exception:
+            pass
         print("    [OK] Melanjutkan ke pencarian...")
         time.sleep(2)
+    else:
+        print("    [OK] Sesi Threads siap digunakan.")
 
-    # Mulai Pencarian
+    return THREADS_DRIVER
+
+
+def scrape_threads(keyword, max_results=200):
+    """
+    Scrape Threads dengan Single-Phase extraction di tab RECENT:
+    - Menggunakan tab "Recent" (bukan "Top") untuk hasil yang lebih relevan
+    - Scroll + ekstraksi data langsung dari DOM
+    - Filter tanggal: hanya post dari 1 Januari 2025 ke atas
+    - Filter konten: skip post yang tidak relevan dengan keyword
+    
+    Args:
+        keyword: kata kunci pencarian
+        max_results: target jumlah data (default 200)
+    """
+    global THREADS_DRIVER, _SEEN_URLS
+
+    print(f"    - Threads Selenium: mencari '{keyword}' (tab Recent)...")
+
+    if THREADS_DRIVER is None:
+        print("    [!] Membuka Chrome untuk Threads pertama kali...")
+        _init_driver()
+
+    # ===== NAVIGASI KE TAB "RECENT" =====
     query = urllib.parse.quote(keyword)
+    # Pertama load halaman search biasa
     url = f"https://www.threads.net/search?q={query}&serp_type=default"
     
-    THREADS_DRIVER.get(url)
-    
-    # Tunggu sebentar agar halaman dan JS-nya load
-    time.sleep(5)
-    
-    results = []
+    # Navigasi dengan auto-reconnect jika Chrome crash
+    for attempt in range(3):
+        try:
+            THREADS_DRIVER.get(url)
+            break
+        except (ConnectionResetError, ConnectionRefusedError, ConnectionAbortedError, OSError) as e:
+            print(f"    [!] Chrome koneksi putus (attempt {attempt+1}/3): {e}")
+            print("    [INFO] Merestart Chrome...")
+            THREADS_DRIVER = None
+            time.sleep(3)
+            _init_driver()
+        except Exception as e:
+            err_str = str(e).lower()
+            if 'connection' in err_str or 'chrome' in err_str or 'session' in err_str or 'disconnected' in err_str:
+                print(f"    [!] Chrome error (attempt {attempt+1}/3): {e}")
+                print("    [INFO] Merestart Chrome...")
+                THREADS_DRIVER = None
+                time.sleep(3)
+                _init_driver()
+            else:
+                raise
+    time.sleep(3)
+
+    # Klik tab "Recent" / "Terbaru"
+    try:
+        clicked_recent = THREADS_DRIVER.execute_script("""
+            const tabs = document.querySelectorAll('a, div[role="tab"], span, button');
+            for (const tab of tabs) {
+                const text = (tab.innerText || '').trim().toLowerCase();
+                if (text === 'recent' || text === 'terbaru') {
+                    tab.click();
+                    return true;
+                }
+            }
+            return false;
+        """)
+        if clicked_recent:
+            print("    [OK] Berhasil klik tab 'Recent/Terbaru'")
+            time.sleep(4)
+        else:
+            print("    [WARN] Tidak menemukan tab 'Recent'. Mencoba URL langsung...")
+            # Fallback: coba URL parameter recent
+            url = f"https://www.threads.net/search?q={query}&serp_type=recent"
+            THREADS_DRIVER.get(url)
+            time.sleep(4)
+    except Exception as e:
+        print(f"    [WARN] Gagal klik tab Recent: {e}. Mencoba URL langsung...")
+        url = f"https://www.threads.net/search?q={query}&serp_type=recent"
+        THREADS_DRIVER.get(url)
+        time.sleep(4)
+
+    # Tunggu konten muncul
+    try:
+        WebDriverWait(THREADS_DRIVER, 12).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'div[data-pressable-container="true"], article, div[role="article"]'))
+        )
+    except Exception:
+        try:
+            body_text = (THREADS_DRIVER.execute_script("return document.body.innerText") or "").lower()
+
+            if "no results" in body_text or "tidak ada hasil" in body_text or "tidak ditemukan" in body_text:
+                print(f"    [INFO] Pencarian kosong (Tidak ada hasil). Melewati keyword ini.")
+                return []
+
+            error_keywords = ["something went wrong", "ada yang salah", "try reloading",
+                              "kesalahan teknis", "muat ulang", "rate limit",
+                              "masuk untuk melanjutkan", "log in to continue"]
+            if any(err in body_text for err in error_keywords):
+                print("\n    [!] ERROR: Threads memblokir pencarian (Sesi expired/terkena limit).")
+                THREADS_DRIVER.get("https://www.threads.net/login")
+                time.sleep(3)
+
+                print("\n" + "=" * 60)
+                print("🚨 SESI THREADS KEDALUWARSA / LIMIT 🚨")
+                print("1. Jendela Chrome berada di halaman Login Threads.")
+                print("2. Silakan LOGIN ULANG secara manual.")
+                print("3. Setelah berhasil login, pastikan pencarian manual berhasil.")
+                print("4. Kembali ke sini dan tekan ENTER.")
+                print("=" * 60 + "\n")
+
+                input("👉 TEKAN ENTER JIKA SUDAH LOGIN ULANG & AMAN... ")
+                print("    [INFO] Melanjutkan pencarian...")
+                THREADS_DRIVER.get(url)
+                time.sleep(5)
+        except Exception:
+            pass
+
+    time.sleep(3)
+
+    # Cek jumlah post di layar untuk debug
+    try:
+        post_count = THREADS_DRIVER.execute_script("""
+            const selectors = ['div[data-pressable-container="true"]', 'article', 'div[role="article"]'];
+            for (const sel of selectors) {
+                const els = document.querySelectorAll(sel);
+                if (els.length >= 2) return els.length;
+            }
+            return 0;
+        """)
+        print(f"    [DEBUG] Jumlah post di layar awal: {post_count}")
+
+        if post_count == 0:
+            body_text = (THREADS_DRIVER.execute_script("return document.body.innerText") or "").lower()
+            if "no results" in body_text or "tidak ada hasil" in body_text:
+                print(f"    [INFO] Pencarian kosong (Tidak ada hasil). Melewati keyword ini.")
+                return []
+
+            print("    [!] Masih 0 post. Coba refresh paksa...")
+            THREADS_DRIVER.refresh()
+            time.sleep(7)
+
+            # Coba klik tab Recent lagi setelah refresh
+            THREADS_DRIVER.execute_script("""
+                const tabs = document.querySelectorAll('a, div[role="tab"], span, button');
+                for (const tab of tabs) {
+                    const text = (tab.innerText || '').trim().toLowerCase();
+                    if (text === 'recent' || text === 'terbaru' || text === 'utas baru') {
+                        tab.click();
+                        return;
+                    }
+                }
+            """)
+            time.sleep(4)
+
+            post_count = THREADS_DRIVER.execute_script("""
+                const selectors = ['div[data-pressable-container="true"]', 'article', 'div[role="article"]'];
+                for (const sel of selectors) {
+                    const els = document.querySelectorAll(sel);
+                    if (els.length >= 2) return els.length;
+                }
+                return 0;
+            """)
+            print(f"    [DEBUG] Jumlah post setelah refresh: {post_count}")
+
+            if post_count == 0:
+                body_text = (THREADS_DRIVER.execute_script("return document.body.innerText") or "").lower()
+                if "no results" in body_text or "tidak ada hasil" in body_text:
+                    print(f"    [INFO] Pencarian kosong (Tidak ada hasil). Melewati keyword ini.")
+                    return []
+
+                print("\n" + "=" * 60)
+                print("🚨 THREADS TIDAK MENAMPILKAN POST (RATE LIMIT / SESI MACET) 🚨")
+                print(f"Keyword: '{keyword}' tidak memuat data di layar browser.")
+                print("1. Cek jendela Chrome: blank, limit, atau perlu re-login.")
+                print("2. Setelah aman, tekan ENTER untuk coba lagi.")
+                print("=" * 60 + "\n")
+                input("👉 TEKAN ENTER JIKA SUDAH AMAN / SIAP COBA LAGI... ")
+                THREADS_DRIVER.get(url)
+                time.sleep(5)
+    except:
+        pass
+
+    # ========== SINGLE-PHASE: SCROLL + EXTRACT LANGSUNG ==========
+    all_post_data = {}  # dictionary url/content_hash -> data
     last_height = THREADS_DRIVER.execute_script("return document.body.scrollHeight")
-    
-    # JavaScript extractor yang lebih canggih
-    extract_js = """
-    const posts = [];
+    no_new_count = 0
+    max_no_new = 12  # Threads butuh lebih banyak patience
+    date_cutoff_reached = False
+    skipped_irrelevant = 0
+
+    # JavaScript extractor — dijalankan tiap scroll
+    collect_data_js = r"""
+    const results = [];
     const seen = new Set();
     
-    // Cari container post menggunakan beberapa selector
     const selectors = [
         'div[data-pressable-container="true"]',
         'article',
@@ -79,8 +435,8 @@ def scrape_threads(keyword, max_results=30):
         if (containers.length >= 2) break;
     }
     
-    if (containers.length >= 2) {
-        for (const container of containers) {
+    for (const container of containers) {
+        try {
             const fullText = container.innerText.trim();
             if (!fullText || fullText.length < 20) continue;
             
@@ -88,315 +444,257 @@ def scrape_threads(keyword, max_results=30):
             let author = '';
             const authorLink = container.querySelector('a[href*="/@"]');
             if (authorLink) {
-                author = authorLink.innerText.trim().replace('@', '');
+                const href = authorLink.getAttribute('href') || '';
+                const match = href.match(/@([\w_.]+)/);
+                if (match) author = match[1];
+                if (!author) author = authorLink.innerText.trim().replace('@', '');
             }
             
-            // === CONTENT (ambil semua span teks) ===
+            // === URL ===
+            let postUrl = '';
+            const postLink = container.querySelector('a[href*="/post/"]');
+            if (postLink) {
+                const href = postLink.getAttribute('href') || '';
+                postUrl = href.startsWith('http') ? href : 'https://www.threads.net' + href;
+                postUrl = postUrl.split('?')[0];
+            }
+            
+            // === CONTENT ===
             const spans = container.querySelectorAll('span[dir="auto"]');
             let contentArr = [];
             for (const span of spans) {
-                // Hindari duplikasi jika ada span di dalam span
                 if (span.parentElement && span.parentElement.closest('span[dir="auto"]')) continue;
                 
                 const t = span.innerText.trim();
                 if (!t) continue;
                 
-                // Abaikan teks author atau teks tombol UI
                 const lowerT = t.toLowerCase();
                 const lowerAuthor = author.toLowerCase();
                 if (lowerT === lowerAuthor || lowerT === '@' + lowerAuthor) continue;
                 if (lowerT === 'terjemahkan' || lowerT === 'translate' || lowerT === 'meta.ai') continue;
-                
-                // Abaikan teks berformat waktu (contoh: "1hari", "8 jam", "15 menit", "2 hari")
-                if (lowerT.match(/^(\\d+\\s*(hari|jam|menit|detik|minggu|bulan|tahun|h|m|s|w|d|y)s?)$/)) continue;
-                // Abaikan teks berformat tanggal (contoh: "24/09/2026", "11-09-2026")
-                if (lowerT.match(/^\\d{1,2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{2,4}$/)) continue;
-                if (/^[\d.,kKmMrRbBjJtT\s]+$/.test(t)) continue; // Abaikan teks yang isinya cuma angka/satuan like
-                if (span.closest('div[role="button"]')) continue; // Abaikan teks di dalam tombol
+                if (lowerT === 'verified' || lowerT === 'terverifikasi') continue;
+                if (lowerT.match(/^\d+\s*(hari|jam|menit|detik|minggu|bulan|tahun|h|m|s|w|d|y)s?$/)) continue;
+                if (lowerT.match(/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/)) continue;
+                if (/^[\d.,kKmMrRbBjJtT\s]+$/.test(t)) continue;
+                if (span.closest('div[role="button"]')) continue;
                 
                 contentArr.push(t);
             }
-            let content = contentArr.join('\\n');
-            if (!content || seen.has(content)) continue;
-            seen.add(content);
+            let content = contentArr.join(' ');
+            if (!content || content.length < 15) continue;
             
-            // === URL ===
-            let url = '';
-            const postLink = container.querySelector('a[href*="/post/"]');
-            if (postLink) {
-                const href = postLink.getAttribute('href') || '';
-                url = href.startsWith('http') ? href : 'https://www.threads.net' + href;
+            const contentKey = content.substring(0, 100);
+            if (seen.has(contentKey)) continue;
+            seen.add(contentKey);
+
+            // === DATE ===
+            let dateStr = '';
+            const timeEl = container.querySelector('time');
+            if (timeEl) {
+                dateStr = timeEl.getAttribute('datetime') || timeEl.innerText || '';
             }
-            
+
             // === ENGAGEMENT METRICS ===
-            let likes = 0;
-            let replies = 0;
-            let shares = 0; 
-            let views = 0; // Kembalikan views
+            let likes = 0, replies = 0, shares = 0, reposts = 0, views = 0;
             
-            // Kita cari elemen div[role="button"] yang berada di bawah container
-            // Tombol interaksi ini biasanya punya pola urutan tertentu jika text content dibaca.
-            // Namun yang paling aman adalah mencari SVG dan judulnya.
             const svgs = container.querySelectorAll('svg');
-            
             for (const svg of svgs) {
                 const titleNode = svg.querySelector('title');
                 const titleText = (titleNode ? titleNode.textContent : svg.getAttribute('aria-label') || '').toLowerCase();
                 if (!titleText) continue;
                 
-                // Cari tombol interaksi yang membungkus SVG ini
-                let btn = svg.closest('div[role="button"]');
-                if (!btn) {
-                    // Beberapa versi DOM Threads tidak pakai role="button", tapi div dengan tabindex
-                    btn = svg.closest('div[tabindex="0"]');
-                }
-                
+                let btn = svg.closest('div[role="button"]') || svg.closest('div[tabindex="0"]');
                 if (!btn) continue;
                 
-                // Ambil semua text di dalam button tersebut (misal "Suka 12,8 rb" atau "1.2K")
                 const rawText = btn.textContent || '';
-                // Hapus nama judulnya (misal menghapus kata "Suka" sehingga tersisa "12,8 rb")
-                // Hilangkan koma/titik sebagai pemisah ribuan agar aman
                 let numStr = rawText.toLowerCase().replace(titleText.toLowerCase(), '').trim();
-                
                 if (!numStr) continue;
                 
                 let num = 0;
-                // Parse angka, contoh: "35", "1.2K", "1,5M", "12,8 rb", "2,1 jt"
                 const match = numStr.match(/([\d.,]+)\s*(k|m|rb|jt)?/);
                 if (match) {
-                    // ganti koma menjadi titik agar bisa di-parse float, khusus untuk desimal "12,8" -> "12.8"
-                    // tapi hati-hati, jika "1.200" di Indonesia itu ribu.
                     let valStr = match[1];
-                    // Aturan aman: 
-                    // Jika ada K/M/rb/jt, maka , atau . adalah desimal (misal 1.2K atau 12,8 rb)
                     if (match[2]) {
                         valStr = valStr.replace(',', '.');
                         num = parseFloat(valStr);
                         if (match[2] === 'k' || match[2] === 'rb') num *= 1000;
                         else if (match[2] === 'm' || match[2] === 'jt') num *= 1000000;
                     } else {
-                        // Jika tidak ada huruf satuan, maka koma/titik adalah pemisah ribuan (buang saja)
                         valStr = valStr.replace(/[.,]/g, '');
                         num = parseInt(valStr);
                     }
                 }
                 
-                // Pastikan hanya ambil angka dari baris interaksi UTAMA (postingan, bukan balasan)
-                // Kita batasi dengan mengecek !likes dsb untuk hanya mengisi nilai pertama
                 if (titleText.includes('suka') || titleText.includes('like') || titleText.includes('heart')) {
                     if (likes === 0 && !isNaN(num)) likes = num;
                 } else if (titleText.includes('komentar') || titleText.includes('repl') || titleText.includes('balas')) {
                     if (replies === 0 && !isNaN(num)) replies = num;
-                } else if (titleText.includes('bagikan') || titleText.includes('share') || titleText.includes('kirim') || titleText.includes('send') || titleText.includes('pesawat')) {
+                } else if (titleText.includes('repost') || titleText.includes('utas ulang') || titleText.includes('quote')) {
+                    if (reposts === 0 && !isNaN(num)) reposts = num;
+                } else if (titleText.includes('bagikan') || titleText.includes('share') || titleText.includes('kirim') || titleText.includes('send')) {
                     if (shares === 0 && !isNaN(num)) shares = num;
                 }
             }
-            
-            // === VIEWS (FALLBACK) ===
-            // Cari elemen teks apa saja di dalam container yang berakhiran "views" atau "tayangan"
-            if (views === 0) {
-                const textNodes = container.querySelectorAll('span, div');
-                for (const el of textNodes) {
-                    const txt = (el.innerText || '').trim().toLowerCase();
-                    const viewMatch = txt.match(/^([\\d.,]+)\\s*(k|m|rb|jt)?\\s*(views|tayangan)$/);
-                    if (viewMatch) {
-                        let valStr = viewMatch[1];
-                        let num = 0;
-                        if (viewMatch[2]) {
-                            valStr = valStr.replace(',', '.');
-                            num = parseFloat(valStr);
-                            if (viewMatch[2] === 'k' || viewMatch[2] === 'rb') num *= 1000;
-                            else if (viewMatch[2] === 'm' || viewMatch[2] === 'jt') num *= 1000000;
-                        } else {
-                            num = parseInt(valStr.replace(/[.,]/g, ''));
-                        }
-                        if (!isNaN(num)) {
-                            views = num;
-                            break;
+
+            results.push({
+                url: postUrl,
+                date: dateStr,
+                text: content,
+                username: author,
+                likes: likes,
+                views: views,
+                reposts: reposts,
+                shares: shares,
+                replies: replies
+            });
+        } catch(e) {}
+    }
+    return results;
+    """
+
+    while len(all_post_data) < max_results:
+        try:
+            extracted_data = THREADS_DRIVER.execute_script(collect_data_js)
+            count_before = len(all_post_data)
+
+            for item in (extracted_data or []):
+                post_url = item.get('url', '')
+                content_text = item.get('text', '')
+                date_str = item.get('date', '')
+                
+                # Filter tanggal: stop jika post sudah sebelum 1 Jan 2025
+                if date_str and not _is_after_cutoff(date_str):
+                    date_cutoff_reached = True
+                    continue
+                
+                # Filter konten: skip post yang tidak relevan
+                if not _is_content_relevant(content_text, keyword):
+                    skipped_irrelevant += 1
+                    continue
+                
+                # Deduplikasi
+                dedup_key = post_url if post_url else f"content_{abs(hash(content_text)) % 10000000}"
+                
+                if not dedup_key or dedup_key in all_post_data or dedup_key in _SEEN_URLS:
+                    continue
+                all_post_data[dedup_key] = item
+
+            new_count = len(all_post_data) - count_before
+            if new_count > 0:
+                print(f"      [Scroll] {len(all_post_data)} Data terkumpul (+{new_count} baru)", end="")
+                if skipped_irrelevant > 0:
+                    print(f" | {skipped_irrelevant} irrelevant dibuang", end="")
+                print()
+
+            # Jika tanggal cutoff tercapai, berhenti
+            if date_cutoff_reached:
+                print(f"    [INFO] Tanggal post sudah melewati batas (sebelum 1 Jan 2025). Berhenti.")
+                break
+
+            if new_count == 0:
+                no_new_count += 1
+                if no_new_count >= max_no_new:
+                    print(f"    [INFO] Mentok maksimal! {max_no_new}x scroll tanpa data baru. Berhenti.")
+                    break
+            else:
+                no_new_count = 0
+
+            if len(all_post_data) >= max_results:
+                break
+
+            THREADS_DRIVER.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(random.uniform(2.5, 4.5))
+
+            # Cek error di tengah scroll
+            body_text = (THREADS_DRIVER.execute_script("return document.body.innerText") or "").lower()
+            error_keywords = ["something went wrong", "ada yang salah", "try reloading",
+                              "kesalahan teknis", "muat ulang", "rate limit",
+                              "masuk untuk melanjutkan"]
+            if len(body_text) < 500 and any(err in body_text for err in error_keywords):
+                print("\n    [!] ERROR DI TENGAH SCROLL: Threads memblokir pencarian.")
+                THREADS_DRIVER.get("https://www.threads.net/login")
+                time.sleep(3)
+
+                print("\n" + "=" * 60)
+                print("🚨 SESI THREADS KEDALUWARSA / LIMIT DI TENGAH JALAN 🚨")
+                print("1. Silakan LOGIN ULANG (pakai akun lain jika limit).")
+                print("2. Jika pencarian manual berhasil, kembali ke sini dan tekan ENTER.")
+                print("=" * 60 + "\n")
+
+                input("👉 TEKAN ENTER JIKA SUDAH LOGIN ULANG & AMAN... ")
+
+                print("    [INFO] Melanjutkan pencarian (scroll ulang dari atas)...")
+                THREADS_DRIVER.get(url)
+                time.sleep(5)
+                # Klik tab Recent lagi setelah re-login
+                THREADS_DRIVER.execute_script("""
+                    const tabs = document.querySelectorAll('a, div[role="tab"], span, button');
+                    for (const tab of tabs) {
+                        const text = (tab.innerText || '').trim().toLowerCase();
+                        if (text === 'recent' || text === 'terbaru' || text === 'utas baru') {
+                            tab.click();
+                            return;
                         }
                     }
-                }
-            }
-            
-            // === DATE ===
-            let date = '';
-            const timeEl = container.querySelector('time');
-            if (timeEl) {
-                date = timeEl.getAttribute('datetime') || timeEl.innerText || '';
-            }
-            if (!date) {
-                const dateMatch = fullText.match(/(\\d{1,2}\\/\\d{1,2}\\/\\d{4}|\\d+\\s*(?:jam|hari|minggu|menit|detik|hours?|days?|weeks?)\\s*(?:yang lalu|ago)?)/i);
-                if (dateMatch) date = dateMatch[1];
-            }
-            
-            posts.push({
-                content: content.substring(0, 500),
-                author: author,
-                likes: likes || 0,
-                comments: replies || 0,
-                shares: shares || 0,
-                views: views || 0,
-                url: url,
-                date: date
-            });
-        }
-    }
-    
-    // Fallback: jika selector utama gagal
-    if (posts.length < 2) {
-        const allSpans = document.querySelectorAll('span[dir="auto"]');
-        for (const span of allSpans) {
-            const text = span.innerText.trim();
-            if (text && text.length > 30 && !seen.has(text)) {
-                seen.add(text);
-                
-                let author = '';
-                const usernameMatch = text.match(/^(\\w[\\w.]{1,30})\\s/);
-                if (usernameMatch) author = usernameMatch[1];
-                
-                posts.push({
-                    content: text.substring(0, 500),
-                    author: author,
-                    likes: 0,
-                    comments: 0,
-                    shares: 0,
-                    views: 0,
-                    url: '',
-                    date: ''
-                });
-            }
-        }
-    }
-    return posts;
-    """
-    
-    while len(results) < max_results:
-        try:
-            # Ekstrak dari DOM yang sedang tampil
-            extracted = THREADS_DRIVER.execute_script(extract_js)
-            
-            for post_data in extracted:
-                if len(results) >= max_results:
-                    break
-                
-                content = post_data.get("content", "")
-                if not content or len(content) < 20:
-                    continue
-                
-                # Bersihkan konten dari newline dan teks sampah
-                content = content.replace('\n', ' ').replace('\r', ' ')
-                content = re.sub(r'\s+', ' ', content).strip()
-                # Hapus pola '1 / 2', 'Terjemahkan', 'meta.ai' dll di akhir teks
-                # Kita gunakan regex yang lebih kuat untuk mengatasi sisa karakter aneh
-                content = re.sub(r'(?:\s*\d+\s*/\s*\d+[^a-zA-Z0-9]*|\s*Terjemahkan\s*|\s*meta\.ai\s*)$', '', content, flags=re.IGNORECASE).strip()
-                
-                # Filter: skip jika konten terlalu pendek setelah cleaning
-                if len(content) < 20:
-                    continue
-                
-                # Cek duplikat
-                if any(r['content'] == content for r in results):
-                    continue
-                    
-                author = post_data.get("author", "") or "Threads_User"
-                results.append({
-                    "post_id": f"threads_{abs(hash(content)) % 1000000}",
-                    "platform": "Threads",
-                    "author": author,
-                    "handle": f"@{author}" if author != "Threads_User" else "",
-                    "content": content[:500],
-                    "description": "",
-                    "created_at": post_data.get("date", "") or datetime.now().isoformat(),
-                    "likes": int(post_data.get("likes", 0)),
-                    "shares": int(post_data.get("shares", 0)),
-                    "comments": int(post_data.get("comments", 0)),
-                    "views": int(post_data.get("views", 0)),
-                    "url": post_data.get("url", ""),
-                    "keyword": keyword,
-                    "scraped_at": datetime.now().isoformat()
-                })
-        except Exception as e:
-            print(f"    [WARN] JS Extract error: {e}")
-            pass
-            
-        if len(results) >= max_results:
-            break
-            
-        # Scroll down
-        THREADS_DRIVER.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(3)
-        
-        new_height = THREADS_DRIVER.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            time.sleep(3)
+                """)
+                time.sleep(4)
+                continue
+
             new_height = THREADS_DRIVER.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
-                break
-        last_height = new_height
+                time.sleep(2)
+                new_height = THREADS_DRIVER.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    no_new_count += 1
+            last_height = new_height
 
-    # === POST-PROCESSING: AMBIL VIEWS SATU PER SATU ===
-    print(f"    [INFO] Mengambil angka 'views' untuk {len(results)} postingan (membuka tab satu per satu)...")
-    try:
-        main_window = THREADS_DRIVER.current_window_handle
-        for i, r in enumerate(results):
-            url = r.get("url")
-            if not url:
-                continue
-            try:
-                print(f"      - Cek views {i+1}/{len(results)}")
-                THREADS_DRIVER.execute_script(f"window.open('{url}', '_blank');")
-                # Pindah ke tab baru
-                for handle in THREADS_DRIVER.window_handles:
-                    if handle != main_window:
-                        THREADS_DRIVER.switch_to.window(handle)
-                        break
-                
-                time.sleep(3) # Tunggu halamannya loading
-                
-                views_js = """
-                let v = 0;
-                const els = document.querySelectorAll('span, div, h1, h2, h3, p');
-                for(let el of els){
-                    const txt = (el.innerText || '').trim().toLowerCase();
-                    const match = txt.match(/^([\\d.,]+)\\s*(k|m|rb|jt)?\\s*(views|tayangan)$/);
-                    if(match){
-                        let valStr = match[1];
-                        if (match[2]) {
-                            valStr = valStr.replace(',', '.');
-                            v = parseFloat(valStr);
-                            const suf = match[2];
-                            if(suf==='k'||suf==='rb') v*=1000;
-                            else if(suf==='m'||suf==='jt') v*=1000000;
-                        } else {
-                            v = parseInt(valStr.replace(/[.,]/g, ''));
-                        }
-                        return v;
-                    }
-                }
-                return 0;
-                """
-                v = THREADS_DRIVER.execute_script(views_js)
-                if v:
-                    r['views'] = int(v)
-                else:
-                    r['views'] = 0
-                    
-                THREADS_DRIVER.close() # Tutup tab
-                THREADS_DRIVER.switch_to.window(main_window) # Kembali ke tab utama
-                time.sleep(1) # Jeda antar klik
-            except Exception as e:
-                print(f"      [WARN] Gagal ambil views: {e}")
-                try:
-                    if len(THREADS_DRIVER.window_handles) > 1:
-                        THREADS_DRIVER.close()
-                    THREADS_DRIVER.switch_to.window(main_window)
-                except:
-                    pass
-    except Exception as e:
-        print(f"    [WARN] Error saat memproses views: {e}")
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(f"    [WARN] Error saat scroll: {e}")
+            break
 
-    return results
+    print(f"    [INFO] Selesai. Total {len(all_post_data)} data post berhasil diekstrak.")
+    if skipped_irrelevant > 0:
+        print(f"    [INFO] {skipped_irrelevant} post tidak relevan dibuang.")
+
+    # Format hasil akhir
+    final_data = []
+    for item in all_post_data.values():
+        date_str = item.get('date', '')
+        content = item.get('text', '')
+        # Clean single-line
+        clean_text = content.replace('\n', ' ').replace('\r', ' ')
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        # Hapus sisa UI text
+        clean_text = re.sub(r'(?:\s*\d+\s*/\s*\d+[^a-zA-Z0-9]*|\s*Terjemahkan\s*|\s*meta\.ai\s*)$', '', clean_text, flags=re.IGNORECASE).strip()
+
+        if len(clean_text) < 15:
+            continue
+
+        post_url = item.get('url', '')
+        author = item.get('username', '') or 'Threads_User'
+
+        final_data.append({
+            'platform': 'Threads',
+            'keyword': keyword,
+            'url': post_url,
+            'handle': f"@{author}" if author != 'Threads_User' else '',
+            'content': clean_text[:500],
+            'created_at': _to_wib(date_str),
+            'likes': int(item.get('likes', 0)),
+            'comments': int(item.get('replies', 0)),
+            'reposts': int(item.get('reposts', 0)),
+            'shares': int(item.get('shares', 0)),
+            'views': int(item.get('views', 0)),
+            'scraped_at': datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S') + ' WIB',
+        })
+        if post_url:
+            _SEEN_URLS.add(post_url)
+
+    print(f"    [OK] {len(final_data)} data post terfilter & bersih.")
+    return final_data
+
 
 # ============================================================
 # TEST
@@ -406,8 +704,7 @@ if __name__ == "__main__":
     data = scrape_threads("makan bergizi gratis", max_results=5)
     print(f"Berhasil ambil {len(data)} data")
     for d in data:
-        print(f"  - Likes: {d['likes']}, Comments: {d['comments']}, Author: {d['author']}")
+        print(f"  - Likes: {d['likes']}, Comments: {d['comments']}, Handle: {d['handle']}")
         print(f"    Content: {d['content'][:80]}...")
     if THREADS_DRIVER:
         THREADS_DRIVER.quit()
-

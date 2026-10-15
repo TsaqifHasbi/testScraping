@@ -1,10 +1,17 @@
 # ============================================================
-# CELL 4: SCRAPING TWITTER (SELENIUM UNDETECTED)
+# CELL 4: SCRAPING TWITTER/X (SELENIUM UNDETECTED)
+# - 2 Fase: Kumpulkan URL → Ekstraksi di Tab Baru
+# - Filter tanggal: 1 Januari 2025 - sekarang
+# - Deduplikasi URL global
+# - Auto-resume support
+# - Tanpa batasan max_results (full crawl)
 # ============================================================
 import time
 import urllib.parse
-from datetime import datetime
 import os
+import subprocess
+import random
+from datetime import datetime, timezone, timedelta
 
 try:
     # pyrefly: ignore [missing-import]
@@ -21,250 +28,460 @@ except ImportError:
 # Simpan driver di level global agar login hanya 1x sepanjang program jalan
 TWITTER_DRIVER = None
 
-def scrape_twitter(keyword, max_results=100):
+# Path untuk Chrome profile persisten (login disimpan)
+TW_PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".tw_scraper_profile")
+
+# WIB timezone (UTC+7)
+WIB = timezone(timedelta(hours=7))
+
+# Tanggal cutoff: 1 Januari 2025
+DATE_CUTOFF = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+# ---- Global tracking ----
+_SEEN_URLS = set()  # URL tweet yang sudah pernah di-scrape
+
+
+def reset_tracking():
+    """Reset tracking (untuk awal run baru tanpa resume)."""
+    global _SEEN_URLS
+    _SEEN_URLS = set()
+
+
+def load_seen_urls(urls):
+    """Load URL yang sudah ada dari CSV sebelumnya (untuk resume)."""
+    global _SEEN_URLS
+    _SEEN_URLS.update(urls)
+    print(f"    [DEDUP] {len(_SEEN_URLS)} URL sudah diketahui, akan di-skip.")
+
+
+# ---- Helpers ----
+
+def _to_wib(date_str):
+    """Convert ISO datetime string ke format WIB."""
+    if not date_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        dt_wib = dt.astimezone(WIB)
+        return dt_wib.strftime('%Y-%m-%d %H:%M:%S') + ' WIB'
+    except Exception:
+        return date_str
+
+
+def _is_after_cutoff(date_str):
+    """Cek apakah tanggal tweet >= 1 Januari 2025."""
+    if not date_str:
+        return True  # Jika tidak ada tanggal, tetap ambil
+    try:
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        return dt >= DATE_CUTOFF
+    except Exception:
+        return True
+
+
+def _init_driver():
+    """Buat driver baru dengan profile persisten."""
     global TWITTER_DRIVER
+
+    # Tutup driver lama jika ada
+    if TWITTER_DRIVER is not None:
+        try:
+            TWITTER_DRIVER.quit()
+        except:
+            pass
+        TWITTER_DRIVER = None
+
+    # Kill semua proses chrome yang menggantung
+    try:
+        subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe'], capture_output=True, timeout=5)
+        time.sleep(2)
+    except:
+        pass
+
+    options = uc.ChromeOptions()
+    options.add_argument('--disable-popup-blocking')
+    options.add_argument('--disable-notifications')
+    options.add_argument('--lang=id-ID,id,en-US,en')
+    options.add_argument('--disable-features=Translate')
+    options.add_argument('--disable-background-timer-throttling')
+    options.add_argument('--disable-backgrounding-occluded-windows')
+    options.add_argument('--disable-renderer-backgrounding')
+    options.add_argument(f'--user-data-dir={TW_PROFILE_DIR}')
+
+    # Set preferensi bahasa bawaan Chrome ke Bahasa Indonesia
+    prefs = {
+        "intl.accept_languages": "id-ID,id,en-US,en",
+        "translate": {"enabled": False} # Matikan popup otomatis Google Translate
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    # Fix infinite hang when downloading chromedriver
+    import socket
+    socket.setdefaulttimeout(30)
+
+    try:
+        TWITTER_DRIVER = uc.Chrome(options=options, version_main=154)
+    except Exception as e:
+        print(f"    [WARN] Gagal init uc.Chrome dengan version_main=154, mencoba tanpa: {e}")
+        TWITTER_DRIVER = uc.Chrome(options=options)
+
+    # Cek apakah sudah login
+    TWITTER_DRIVER.get("https://x.com/home")
+    print("    [INFO] Menunggu beranda Twitter dimuat...")
+    time.sleep(5)
     
+    print("\n" + "=" * 60)
+    print("🚨 WAJIB CEK BROWSER TWITTER (X) 🚨")
+    print("1. Jendela Chrome sudah terbuka di layar Anda.")
+    print("2. Pastikan Anda SUDAH LOGIN dan melihat feed/beranda normal.")
+    print("3. Jika disuruh Login / Captcha / Verifikasi Email, kerjakan DULU.")
+    print("4. JANGAN lanjut jika layar browser masih error 'Something went wrong'.")
+    print("=" * 60 + "\n")
+
+    input("👉 TEKAN ENTER DI SINI HANYA JIKA BROWSER SUDAH LOGIN & AMAN... ")
+    print("    [OK] Melanjutkan ke pencarian...")
+    time.sleep(2)
+
+    return TWITTER_DRIVER
+
+
+def scrape_twitter(keyword, max_results=500):
+    """
+    Scrape Twitter/X dengan 2 fase:
+    - Fase 1: Scroll halaman search untuk kumpulkan URL tweet
+    - Fase 2: Buka setiap URL di tab baru untuk ekstraksi data detail
+    
+    Filter: hanya tweet dari 1 Januari 2025 - sekarang.
+    """
+    global TWITTER_DRIVER, _SEEN_URLS
+
     print(f"    - Twitter Selenium: mencari '{keyword}'...")
-    
+
     if TWITTER_DRIVER is None:
         print("    [!] Membuka Chrome untuk Twitter pertama kali...")
-        options = uc.ChromeOptions()
-        options.add_argument('--disable-popup-blocking')
-        options.add_argument('--lang=id')
-        options.add_argument('--disable-features=Translate')
-        # Gunakan version_main=153 sesuai Chrome laptop Anda
-        TWITTER_DRIVER = uc.Chrome(options=options, version_main=153)
-        
-        TWITTER_DRIVER.get("https://x.com/login")
-        print("\n" + "="*60)
-        print("🚨 TINDAKAN DIBUTUHKAN (TWITTER) 🚨")
-        print("1. Jendela Chrome sudah terbuka.")
-        print("2. Silakan LOGIN X/Twitter dan lewati Captcha secara MANUAL.")
-        print("3. JANGAN tekan Enter sebelum Anda masuk ke Beranda X!")
-        print("="*60 + "\n")
-        
-        input("👉 TEKAN ENTER DI SINI JIKA SUDAH SELESAI LOGIN & CAPTCHA... ")
-        print("    [OK] Melanjutkan ke pencarian...")
-        
-        time.sleep(2)
+        _init_driver()
 
-    # 2. Mulai Pencarian
-    # Tambahkan lang:id agar hasil pencarian berbahasa Indonesia
-    from datetime import datetime
-    cutoff_date = datetime(2024, 1, 1)  # Sejak awal 2024
-    # Gunakan keyword apa adanya tanpa lang:id (keyword sudah bahasa Indonesia)
-    query = urllib.parse.quote(keyword)
-    # TIDAK pakai lang:id karena membuat Twitter mengembalikan tweet sangat tua
-    url = f"https://x.com/search?q={query}&src=typed_query&f=live"
+    # ========== FASE 1: KUMPULKAN URL DARI SEARCH ==========
+    print(f"    [FASE 1] Mengumpulkan URL tweet dari pencarian...")
+
+    # Gunakan query biasa tanpa filter since atau lang, karena kita fokus ke Top engagement murni
+    query_text = keyword
+    query = urllib.parse.quote(query_text)
     
+    # HAPUS parameter &f=live agar Twitter masuk ke tab "Top" (berdasarkan engagement/popularitas)
+    url = f"https://x.com/search?q={query}&src=typed_query"
+
     TWITTER_DRIVER.get(url)
-    
-    # Tunggu tweet pertama muncul
+
+    # Tunggu tweet pertama muncul atau handle error
     try:
-        WebDriverWait(TWITTER_DRIVER, 15).until(
+        WebDriverWait(TWITTER_DRIVER, 12).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="tweet"]'))
         )
     except Exception:
-        pass
-        
+        # Cek apakah terkena error "Something went wrong" atau "No results"
+        try:
+            body_text = (TWITTER_DRIVER.execute_script("return document.body.innerText") or "").lower()
+            
+            if "no results for" in body_text or "tidak ada hasil untuk" in body_text:
+                print(f"    [INFO] Pencarian kosong (Tidak ada hasil). Melewati keyword ini.")
+                return []
+                
+            error_keywords = ["something went wrong", "ada yang salah", "try reloading", "kesalahan teknis", "muat ulang", "rate limit", "batas frekuensi", "batas terlampaui", "cannot retrieve", "tidak dapat memuat"]
+            if any(err in body_text for err in error_keywords):
+                print("\n    [!] ERROR: Twitter memblokir pencarian (Sesi expired/terkena limit).")
+                print("    [INFO] Memaksa logout untuk membersihkan sesi...")
+                TWITTER_DRIVER.delete_all_cookies()
+                TWITTER_DRIVER.get("https://x.com/login")
+                time.sleep(3)
+                
+                print("\n" + "=" * 60)
+                print("🚨 SESI TWITTER KEDALUWARSA / LIMIT 🚨")
+                print("1. Jendela Chrome saat ini berada di halaman Login.")
+                print("2. Silakan LOGIN ULANG (disarankan pakai AKUN TWITTER LAIN jika yang tadi terkena limit).")
+                print("3. Setelah berhasil login, cobalah lakukan pencarian manual.")
+                print("4. Jika pencarian manual berhasil, kembali ke sini dan tekan ENTER.")
+                print("=" * 60 + "\n")
+                
+                input("👉 TEKAN ENTER JIKA SUDAH LOGIN ULANG & AMAN... ")
+                
+                # Coba muat ulang halaman pencariannya
+                print("    [INFO] Melanjutkan pencarian...")
+                TWITTER_DRIVER.get(url)
+                WebDriverWait(TWITTER_DRIVER, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="tweet"]'))
+                )
+        except Exception:
+            pass
+
     time.sleep(3)
     
-    # === DEBUG: Cek kondisi halaman ===
+    # Cek jumlah tweet di layar untuk debug
     try:
         article_count = TWITTER_DRIVER.execute_script('return document.querySelectorAll(\'article[data-testid="tweet"]\').length')
-        page_title = TWITTER_DRIVER.title
-        current_url = TWITTER_DRIVER.current_url
-        print(f"    [DEBUG] URL: {current_url[:80]}...")
-        print(f"    [DEBUG] Title: {page_title}")
-        print(f"    [DEBUG] Jumlah tweet di halaman: {article_count}")
+        print(f"    [DEBUG] Jumlah tweet di layar awal: {article_count}")
+        
+        # Jika masih 0, cek dulu apakah benar-benar kosong
         if article_count == 0:
-            # Cek apakah ada pesan error/kosong
-            body_text = TWITTER_DRIVER.execute_script('return document.body.innerText.substring(0, 300)')
-            print(f"    [DEBUG] Body text: {body_text[:200]}")
-    except Exception as e:
-        print(f"    [DEBUG] Error saat cek halaman: {e}")
-    
-    results = []
+            body_text = (TWITTER_DRIVER.execute_script("return document.body.innerText") or "").lower()
+            if "no results for" in body_text or "tidak ada hasil untuk" in body_text:
+                print(f"    [INFO] Pencarian kosong (Tidak ada hasil). Melewati keyword ini.")
+                return []
+                
+            print("    [!] Masih 0 tweet. Coba refresh paksa...")
+            TWITTER_DRIVER.refresh()
+            time.sleep(7)
+            article_count = TWITTER_DRIVER.execute_script('return document.querySelectorAll(\'article[data-testid="tweet"]\').length')
+            print(f"    [DEBUG] Jumlah tweet setelah refresh paksa: {article_count}")
+
+            # Jika masih 0, coba cari tombol Retry
+            if article_count == 0:
+                clicked_retry = TWITTER_DRIVER.execute_script("""
+                    let btns = document.querySelectorAll('button');
+                    for (let btn of btns) {
+                        let txt = (btn.innerText || '').toLowerCase();
+                        if (txt.includes('retry') || txt.includes('coba lagi')) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                if clicked_retry:
+                    print("    [INFO] Menekan tombol 'Retry / Coba lagi' di layar awal...")
+                    time.sleep(6)
+                    article_count = TWITTER_DRIVER.execute_script('return document.querySelectorAll(\'article[data-testid="tweet"]\').length')
+                    print(f"    [DEBUG] Jumlah tweet setelah Retry: {article_count}")
+
+            # Jika setelah refresh & retry masih 0 tweet dan bukan karena 'no results':
+            if article_count == 0:
+                body_text = (TWITTER_DRIVER.execute_script("return document.body.innerText") or "").lower()
+                if "no results for" in body_text or "tidak ada hasil untuk" in body_text:
+                    print(f"    [INFO] Pencarian kosong (Tidak ada hasil). Melewati keyword ini.")
+                    return []
+                
+                print("\n" + "=" * 60)
+                print("🚨 TWITTER TIDAK MENAMPILKAN TWEET (RATE LIMIT / SESI MACET) 🚨")
+                print(f"Keyword: '{keyword}' tidak memuat data di layar browser.")
+                print("1. Cek jendela Chrome: apakah halaman blank, terkena limit pencarian, atau perlu re-login.")
+                print("2. Jika akun terkena limit, Anda bisa ganti/login akun lain di browser Chrome tersebut.")
+                print("3. Pastikan pencarian manual di Chrome berhasil memunculkan tweet.")
+                print("4. Setelah aman, kembali ke sini dan tekan ENTER untuk mencoba lagi.")
+                print("=" * 60 + "\n")
+                input("👉 TEKAN ENTER JIKA SUDAH AMAN / SIAP COBA LAGI... ")
+                TWITTER_DRIVER.get(url)
+                time.sleep(5)
+                article_count = TWITTER_DRIVER.execute_script('return document.querySelectorAll(\'article[data-testid="tweet"]\').length')
+                print(f"    [DEBUG] Jumlah tweet setelah re-login/refresh: {article_count}")
+    except:
+        pass
+
+    # Kumpulkan Data tweet dari halaman search secara LANGSUNG (Single-Phase)
+    all_tweet_data = {} # dictionary url -> data
     last_height = TWITTER_DRIVER.execute_script("return document.body.scrollHeight")
-    seen_urls = set()
+    no_new_count = 0
+    max_no_new = 8
     
-    extract_js = """
-    const posts = [];
+    collect_data_js = r"""
+    const results = [];
     const articles = document.querySelectorAll('article[data-testid="tweet"]');
-    
     for (const article of articles) {
-        let content = "";
-        const textDiv = article.querySelector('div[data-testid="tweetText"]');
-        if (textDiv) content = textDiv.innerText.trim();
-        
-        // Bersihkan spasi berlebih tapi pertahankan newline/enter
-        content = content.replace(/\\s*\\n\\s*/g, '\\n').trim();
-        
-        let author = "";
-        let handle = "";
-        const userDiv = article.querySelector('div[data-testid="User-Name"]');
-        if (userDiv) {
-            const spans = userDiv.querySelectorAll('span');
-            for (const span of spans) {
-                if (span.innerText.startsWith('@')) {
-                    handle = span.innerText;
-                } else if (!author && span.innerText.trim() && !span.innerText.startsWith('@')) {
-                    author = span.innerText;
+        try {
+            let tweetUrl = '';
+            const links = article.querySelectorAll('a[href*="/status/"]');
+            for (const link of links) {
+                if (link.href.includes('/status/') && !link.href.includes('/photo/') && !link.href.includes('/video/') && !link.href.includes('/analytics')) {
+                    tweetUrl = link.href.split('?')[0];
+                    break;
                 }
             }
-        }
-        
-        let likes = 0, retweets = 0, comments = 0, views = 0;
-        const group = article.querySelector('div[role="group"]');
-        if (group) {
-            // Metode 1: Parsing dari aria-label grup tombol
-            const label = group.getAttribute('aria-label') || "";
-            const parts = label.toLowerCase().split(',');
-            for (const p of parts) {
-                const numMatch = p.match(/\\d+/g);
-                if (!numMatch) continue;
-                const num = parseInt(numMatch.join(''));
-                
-                if (p.includes('suka') || p.includes('like')) likes = num;
-                else if (p.includes('balas') || p.includes('repl')) comments = num;
-                else if (p.includes('posting ulang') || p.includes('repost') || p.includes('retweet')) retweets = num;
-                else if (p.includes('tayangan') || p.includes('view')) views = num;
-            }
-            
-            // Metode 2: Fallback - ambil views dari link analytics (elemen terakhir di group)
-            if (views === 0) {
-                const analyticsLink = group.querySelector('a[href*="/analytics"]');
-                if (analyticsLink) {
-                    const vText = analyticsLink.getAttribute('aria-label') || analyticsLink.innerText || '';
-                    const vMatch = vText.match(/([\\d,\\.]+)/g);
-                    if (vMatch) {
-                        views = parseInt(vMatch.join('').replace(/,/g, ''));
+            if (!tweetUrl) continue;
+
+            let dateStr = '';
+            const timeEl = article.querySelector('time');
+            if (timeEl) dateStr = timeEl.getAttribute('datetime') || '';
+
+            let text = '';
+            const textDiv = article.querySelector('div[data-testid="tweetText"]');
+            if (textDiv) text = textDiv.innerText;
+
+            let handle = '';
+            const userLinks = article.querySelectorAll('a[role="link"]');
+            for (const ul of userLinks) {
+                const textContent = ul.innerText;
+                if (textContent.includes('@')) {
+                    const match = textContent.match(/@[\w_]+/);
+                    if (match) {
+                        handle = match[0];
+                        break;
                     }
                 }
             }
-            
-            // Metode 3: Fallback - ambil dari tombol-tombol individual via aria-label
-            if (likes === 0 && comments === 0 && retweets === 0) {
-                const buttons = group.querySelectorAll('button[data-testid]');
-                for (const btn of buttons) {
-                    const testId = btn.getAttribute('data-testid') || '';
-                    const ariaL = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    const numM = ariaL.match(/([\\d,]+)/);
-                    if (!numM) continue;
-                    const val = parseInt(numM[1].replace(/,/g, ''));
+
+            let likes=0, views=0, retweets=0, replies=0;
+            const groups = article.querySelectorAll('[role="group"]');
+            if (groups.length > 0) {
+                const btns = groups[0].querySelectorAll('[role="button"], a');
+                for (const btn of btns) {
+                    const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    const testId = (btn.getAttribute('data-testid') || '').toLowerCase();
+                    let valStr = btn.innerText.trim();
                     
-                    if (testId === 'like' || ariaL.includes('like') || ariaL.includes('suka')) likes = val;
-                    else if (testId === 'reply' || ariaL.includes('repl') || ariaL.includes('balas')) comments = val;
-                    else if (testId === 'retweet' || ariaL.includes('repost') || ariaL.includes('retweet')) retweets = val;
+                    let val = 0;
+                    if (valStr) {
+                        valStr = valStr.replace(/,/g, '');
+                        if (valStr.match(/K/i)) val = parseFloat(valStr) * 1000;
+                        else if (valStr.match(/M/i)) val = parseFloat(valStr) * 1000000;
+                        else val = parseInt(valStr) || 0;
+                    }
+
+                    if (testId === 'reply' || aria.includes('balas') || aria.includes('reply')) replies = val;
+                    else if (testId === 'retweet' || aria.includes('repost') || aria.includes('retweet')) retweets = val;
+                    else if (testId === 'like' || aria.includes('suka') || aria.includes('like')) likes = val;
+                    else if (aria.includes('tayangan') || aria.includes('view') || testId.includes('view')) views = val;
                 }
             }
-        }
-        
-        let url = "";
-        let date = "";
-        const timeEl = article.querySelector('time');
-        if (timeEl) {
-            date = timeEl.getAttribute('datetime') || "";
-            const a = timeEl.closest('a');
-            if (a) url = a.href;
-        }
-        
-        if (content && url) {
-            posts.push({
-                content: content,
-                author: author || "Unknown",
-                handle: handle,
+
+            results.push({
+                url: tweetUrl,
+                date: dateStr,
+                text: text,
+                username: handle,
                 likes: likes,
-                retweets: retweets,
-                comments: comments,
                 views: views,
-                url: url,
-                date: date
+                retweets: retweets,
+                replies: replies
             });
-        }
+        } catch(e) {}
     }
-    return posts;
+    return results;
     """
-    
-    while len(results) < max_results:
+
+    while len(all_tweet_data) < max_results:
         try:
-            # Klik tombol Show More jika ada untuk semua tweet di layar
-            TWITTER_DRIVER.execute_script("""
-                document.querySelectorAll('div[data-testid="tweet-text-show-more-link"]').forEach(btn => btn.click());
-            """)
-            time.sleep(1.5) # Tunggu agar Twitter sempat memuat sisa teks
-            
-            extracted = TWITTER_DRIVER.execute_script(extract_js)
-            print(f"    [DEBUG] JS returned: {len(extracted) if extracted else 0} posts")
-            if extracted and len(extracted) > 0:
-                print(f"    [DEBUG] Post pertama: url={extracted[0].get('url','N/A')[:50]}, content={str(extracted[0].get('content',''))[:50]}")
-            for post in extracted:
-                if len(results) >= max_results:
-                    break
-                    
-                url_tweet = post.get('url', '')
-                if not url_tweet or url_tweet in seen_urls:
+            extracted_data = TWITTER_DRIVER.execute_script(collect_data_js)
+            count_before = len(all_tweet_data)
+
+            for item in (extracted_data or []):
+                tweet_url = item.get('url', '')
+                if not tweet_url or tweet_url in all_tweet_data or tweet_url in _SEEN_URLS:
                     continue
-                    
-                content = post.get('content', '')
-                if not content:
+                all_tweet_data[tweet_url] = item
+
+            new_count = len(all_tweet_data) - count_before
+            if new_count > 0:
+                print(f"      [Scroll] {len(all_tweet_data)} Data terkumpul (+{new_count} baru)")
+
+            if new_count == 0:
+                clicked_retry = TWITTER_DRIVER.execute_script("""
+                    let btns = document.querySelectorAll('div[data-testid="primaryColumn"] button');
+                    for (let btn of btns) {
+                        let txt = btn.innerText.toLowerCase();
+                        if (txt.includes('retry') || txt.includes('coba lagi')) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                
+                if clicked_retry:
+                    print("      [INFO] Jaringan Twitter melambat. Menekan tombol 'Retry / Coba lagi'...")
+                    time.sleep(5)
                     continue
+
+                no_new_count += 1
+                if no_new_count >= max_no_new:
+                    if len(all_tweet_data) < max_results and "&f=live" not in url and max_results >= 1000:
+                        print(f"    [INFO] Tab 'Top' habis ({len(all_tweet_data)} data). Beralih otomatis ke tab 'Latest' untuk melengkapi {max_results}...")
+                        url = url + "&f=live"
+                        TWITTER_DRIVER.get(url)
+                        no_new_count = 0
+                        time.sleep(5)
+                        continue
+                    else:
+                        print(f"    [INFO] Mentok maksimal! {max_no_new}x scroll tanpa data baru. Berhenti.")
+                        break
+            else:
+                no_new_count = 0
+
+            if len(all_tweet_data) >= max_results:
+                break
+
+            TWITTER_DRIVER.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(random.uniform(2.0, 4.0))
+
+            body_text = (TWITTER_DRIVER.execute_script("return document.body.innerText") or "").lower()
+            error_keywords = ["something went wrong", "ada yang salah", "try reloading", "kesalahan teknis", "muat ulang", "rate limit", "batas frekuensi", "batas terlampaui", "cannot retrieve", "tidak dapat memuat"]
+            if any(err in body_text for err in error_keywords):
+                print("\n    [!] ERROR DI TENGAH SCROLL: Twitter memblokir pencarian.")
+                print("    [INFO] Memaksa logout...")
+                TWITTER_DRIVER.delete_all_cookies()
+                TWITTER_DRIVER.get("https://x.com/login")
+                time.sleep(3)
                 
-                # Filter tweet tua (lebih dari 6 bulan)
-                tweet_date_str = post.get('date', '')
-                if tweet_date_str:
-                    try:
-                        tweet_dt = datetime.fromisoformat(tweet_date_str.replace('Z', '+00:00'))
-                        if tweet_dt.replace(tzinfo=None) < cutoff_date:
-                            print(f"    [DEBUG] SKIP tweet tua: {tweet_date_str}")
-                            continue  # Skip tweet terlalu tua
-                    except:
-                        pass
-                    
-                seen_urls.add(url_tweet)
+                print("\n" + "=" * 60)
+                print("🚨 SESI TWITTER KEDALUWARSA / LIMIT DI TENGAH JALAN 🚨")
+                print("1. Silakan LOGIN ULANG (pakai AKUN TWITTER LAIN jika limit).")
+                print("2. Jika pencarian manual berhasil, kembali ke sini dan tekan ENTER.")
+                print("=" * 60 + "\n")
                 
-                results.append({
-                    "post_id": f"twitter_{abs(hash(url_tweet)) % 1000000}",
-                    "platform": "Twitter",
-                    "author": post.get('author', ''),
-                    "handle": post.get('handle', ''),
-                    "content": content,
-                    "description": "",
-                    "created_at": post.get('date', '') or datetime.now().isoformat(),
-                    "likes": post.get('likes', 0),
-                    "reposts": post.get('retweets', 0), # Mengganti nama shares menjadi reposts sesuai permintaan
-                    "comments": post.get('comments', 0),
-                    "views": post.get('views', 0),
-                    "url": url_tweet,
-                    "keyword": keyword,
-                    "scraped_at": datetime.now().isoformat()
-                })
-        except Exception as e:
-            print(f"    [WARN] JS Extract error: {e}")
+                input("👉 TEKAN ENTER JIKA SUDAH LOGIN ULANG & AMAN... ")
                 
-        if len(results) >= max_results:
-            break
-            
-        TWITTER_DRIVER.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(3)
-        
-        new_height = TWITTER_DRIVER.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            time.sleep(2)
+                print("    [INFO] Melanjutkan pencarian (scroll ulang dari atas)...")
+                TWITTER_DRIVER.get(url)
+                time.sleep(5)
+                continue
+
             new_height = TWITTER_DRIVER.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
-                break
-        last_height = new_height
+                time.sleep(2)
+                new_height = TWITTER_DRIVER.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    no_new_count += 1
+            last_height = new_height
 
-    return results
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(f"    [WARN] Error saat scroll: {e}")
+            break
+
+    print(f"    [INFO] Selesai. Total {len(all_tweet_data)} data tweet berhasil diekstrak.")
+    
+    # Format hasil akhir
+    final_data = []
+    for item in all_tweet_data.values():
+        date_str = item['date']
+        clean_text = item['text'].replace('\n', ' ').replace('\r', ' ')
+        
+        final_data.append({
+            'platform': 'Twitter',
+            'keyword': keyword,
+            'url': item['url'],
+            'handle': item['username'],
+            'content': clean_text,
+            'created_at': _to_wib(date_str),
+            'likes': item['likes'],
+            'comments': item['replies'],
+            'reposts': item['retweets'],
+            'views': item['views'],
+            'scraped_at': datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S') + ' WIB',
+        })
+        _SEEN_URLS.add(item['url'])
+
+    return final_data
+
 
 # ============================================================
 # TEST
 # ============================================================
 if __name__ == "__main__":
-    print("[TEST] Memulai test scrape Twitter (Selenium)...")
-    data = scrape_twitter("makan bergizi gratis", max_results=5)
+    print("[TEST] Memulai test scrape Twitter (Selenium - 2 Fase)...")
+    reset_tracking()
+    data = scrape_twitter("makan bergizi gratis", max_results=10)
     print(f"Berhasil ambil {len(data)} data")
+    for d in data:
+        print(f" -> {d['handle']} | Likes: {d['likes']} | {d['created_at']} | Content: {str(d['content'])[:50]}...")
     if TWITTER_DRIVER:
         TWITTER_DRIVER.quit()
-
