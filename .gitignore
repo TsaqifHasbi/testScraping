@@ -21,7 +21,9 @@ __pycache__/
 # Streamlit
 .streamlit/secrets.toml
 
-# OS Files
-Thumbs.db
-Desktop.ini
-.DS_Store
+# Large corpus datasets (> 100 MB, GitHub limit)
+data/master_scraped_corpus.csv
+data/enriched_corpus_for_sna.csv
+
+# Temporary scratch folder
+scratch/

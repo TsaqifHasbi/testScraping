@@ -1,15 +1,17 @@
 import os
 import sys
-import pandas as pd
-from cell_02_config import TOPICS, OUTPUT_DIR
-from cell_03_youtube import scrape_youtube
 
-# Fix Windows console encoding
+# Fix Windows console encoding immediately before any imports print emojis
 if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
         pass
+
+import pandas as pd
+from cell_02_config import TOPICS, OUTPUT_DIR
+from cell_03_youtube import scrape_youtube
 
 print("=" * 60)
 print("🚀 MEMULAI SCRAPING YOUTUBE (FULL CRAWL)")

@@ -1,0 +1,126 @@
+{
+    "total_nodes": 91060,
+    "total_edges": 3234,
+    "top_influencers": [
+        {
+            "user": "prabowo",
+            "in_degree": 486,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "badangizinasional.ri",
+            "in_degree": 276,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "sudaru_sudaryono",
+            "in_degree": 227,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "kompascom",
+            "in_degree": 193,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "gerindra",
+            "in_degree": 190,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "kemensosri",
+            "in_degree": 186,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "detikcom",
+            "in_degree": 157,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "sorotan",
+            "in_degree": 150,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "gibran_rakabuming",
+            "in_degree": 134,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "prabowo.gibran2",
+            "in_degree": 115,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "pinterpolitik",
+            "in_degree": 112,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "sekolahrakyatid",
+            "in_degree": 92,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "grok",
+            "in_degree": 82,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "mediambg.id",
+            "in_degree": 76,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        },
+        {
+            "user": "bakom.ri",
+            "in_degree": 67,
+            "out_degree": 0,
+            "sentiment": "Netral",
+            "platform": "Mentioned",
+            "engagement": 0
+        }
+    ]
+}
