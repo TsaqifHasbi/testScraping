@@ -134,7 +134,7 @@ $$Z = \frac{p_1 - p_2}{\sqrt{p(1-p)\left(\frac{1}{n_1} + \frac{1}{n_2}\right)}}$
 ## 3. Panduan Training IndoBERT
 
 ### 3.1. Spesifikasi Teknis
-* **Base Model**: `indobenchmark/indobert-base-pbn`
+* **Base Model**: `indobenchmark/indobert-base-p1`
 * **Architecture**: 12-layer Transformer, 768-hidden, 12-heads, 124M parameters.
 * **Hyperparameters Terbaik untuk Teks Sosmed Indonesia**:
   * `Learning Rate`: $2 \times 10^{-5}$ ($0.00002$)

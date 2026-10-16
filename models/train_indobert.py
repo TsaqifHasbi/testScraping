@@ -1,6 +1,6 @@
 """
 IndoBERT Fine-Tuning Pipeline for Sentiment Analysis
-Model Base: indobenchmark/indobert-base-pbn
+Model Base: indobenchmark/indobert-base-p1
 Output: Best Checkpoint, Evaluasi Lengkap (Accuracy, Precision, Recall, F1, Confusion Matrix)
 """
 
@@ -24,7 +24,8 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
 MODEL_SAVE_DIR = os.path.join(os.path.dirname(__file__), 'best_indobert_sentiment')
 os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
 
-MODEL_NAME = "indobenchmark/indobert-base-pbn"
+# Model resmi IndoBERT dari IndoBenchmark (Phase 1 Base)
+MODEL_NAME = "indobenchmark/indobert-base-p1"
 NUM_LABELS = 3
 LABEL_NAMES = ['Negatif', 'Netral', 'Positif']
 
