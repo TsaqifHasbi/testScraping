@@ -264,6 +264,23 @@ def run_training_pipeline(epochs=3, batch_size=16, learning_rate=2e-5, max_lengt
     for i, name in enumerate(LABEL_NAMES):
         print(f"Aktual {name:<7}: {cm[i][0]:>7}  {cm[i][1]:>7}  {cm[i][2]:>7}")
         
+    # Plot & Simpan Visualisasi Confusion Matrix untuk Bab IV Skripsi
+    try:
+        import seaborn as sns
+        plt.figure(figsize=(7, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=LABEL_NAMES, yticklabels=LABEL_NAMES)
+        plt.title(f"Confusion Matrix IndoBERT (Accuracy: {acc*100:.2f}%)", fontsize=12, fontweight='bold', pad=12)
+        plt.xlabel("Label Prediksi Model", fontsize=10)
+        plt.ylabel("Label Aktual (Ground Truth)", fontsize=10)
+        plt.tight_layout()
+        cm_plot_path = os.path.join(MODEL_SAVE_DIR, 'confusion_matrix.png')
+        plt.savefig(cm_plot_path, dpi=300)
+        plt.close()
+        print(f"📊 Gambar grafik Confusion Matrix tersimpan ke: {cm_plot_path}")
+    except Exception as e:
+        print(f"⚠️ Gagal menyimpan grafik confusion matrix: {e}")
+
     # Simpan metrics report ke JSON
     metrics_summary = {
         'model_name': MODEL_NAME,
