@@ -27,3 +27,9 @@ data/enriched_corpus_for_sna.csv
 
 # Temporary scratch folder
 scratch/
+
+# Model checkpoints (> 100 MB)
+*.safetensors
+*.bin
+*.zip
+models/best_indobert_sentiment/model.safetensors
